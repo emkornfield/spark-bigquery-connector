@@ -183,8 +183,9 @@ public class BigQueryDataSourceReader
       // means select *
       Schema tableSchema = readSessionResponse.getReadTableInfo().getDefinition().getSchema();
       selectedFields =
-          ImmutableList.copyOf(
-              tableSchema.getFields().stream().map(Field::getName).collect(Collectors.toList()));
+          tableSchema.getFields().stream()
+              .map(Field::getName)
+              .collect(ImmutableList.toImmutableList());
     }
 
     ImmutableList<String> partitionSelectedFields = selectedFields;
@@ -214,8 +215,9 @@ public class BigQueryDataSourceReader
       if (selectedFields.isEmpty()) {
         // means select *
         selectedFields =
-            ImmutableList.copyOf(
-                schema.getFields().stream().map(Field::getName).collect(Collectors.toList()));
+            schema.getFields().stream()
+                .map(Field::getName)
+                .collect(ImmutableList.toImmutableList());
       } else {
         Set<String> requiredColumnSet = ImmutableSet.copyOf(selectedFields);
         schema =
