@@ -53,7 +53,7 @@ public class ParallelArrowReader implements AutoCloseable {
 
   // Visible for testing.
   private final BlockingQueue<Object> queue;
-  private final Semaphore queueSemaphore;
+  private final LightWeightSemaphore queueSemaphore;
   private final List<ArrowReader> readers;
   private final ExecutorService executor;
   private final VectorLoader loader;
@@ -80,7 +80,7 @@ public class ParallelArrowReader implements AutoCloseable {
     this.executor = executor;
     this.loader = loader;
     this.rootTracer = tracer;
-    this.queueSemaphore = new Semaphore(readers.size());
+    this.queueSemaphore = new LightWeightSemaphore(readers.size());
     this.readersReady = new AtomicInteger(readers.size());
     tracers = new BigQueryStorageReadRowsTracer[readers.size()];
     for (int x = 0; x < readers.size(); x++) {

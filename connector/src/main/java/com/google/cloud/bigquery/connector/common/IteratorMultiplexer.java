@@ -97,7 +97,7 @@ public class IteratorMultiplexer<T> implements AutoCloseable {
 
   private class QueueIterator<T> implements Iterator<T> {
     private final ArrayBlockingQueue<Object> queue = new ArrayBlockingQueue<>(/*capacity=*/ 2);
-    private final Semaphore sem = new Semaphore(1);
+    private final LightWeightSemaphore sem = new LightWeightSemaphore(1);
 
     private Object t = null;
 

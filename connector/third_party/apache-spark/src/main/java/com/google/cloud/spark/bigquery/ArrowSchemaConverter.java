@@ -70,6 +70,9 @@ public class ArrowSchemaConverter extends ColumnVector {
 
   @Override
   public boolean isNullAt(int rowId) {
+    if (accessor.getNullCount() == 0) {
+      return false;
+    }
     return accessor.isNullAt(rowId);
   }
 
@@ -266,6 +269,9 @@ public class ArrowSchemaConverter extends ColumnVector {
 
     // TODO: should be final after removing ArrayAccessor workaround
     boolean isNullAt(int rowId) {
+      if (getNullCount() == 0) {
+        return false;
+      }
       return vector.isNull(rowId);
     }
 
