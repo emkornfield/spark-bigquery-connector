@@ -22,6 +22,8 @@ import com.google.cloud.bigquery.storage.v1.BigQueryReadClient;
 import com.google.cloud.bigquery.storage.v1.BigQueryReadSettings;
 
 import java.util.Optional;
+import java.util.HashMap;
+import java.util.concurrent.ExecutionException;
 import javax.inject.Inject;
 import java.io.IOException;
 import java.io.Serializable;
@@ -40,6 +42,10 @@ public class BigQueryReadClientFactory implements Serializable {
   private final Credentials credentials;
   // using the user agent as HeaderProvider is not serializable
   private final UserAgentHeaderProvider userAgentHeaderProvider;
+  private static final String DEFAULT = new String("DEFAULT");
+  // Used for serializibility.  This is expected to be empty when Spark needs to serialized
+  // it so it should be safe despite TransportChannelProvider not being serializable
+  private final HashMap<String, BigQueryReadClient> clients = new HashMap<>();
 
   @Inject
   public BigQueryReadClientFactory(
@@ -50,23 +56,49 @@ public class BigQueryReadClientFactory implements Serializable {
     this.userAgentHeaderProvider = userAgentHeaderProvider;
   }
 
-  public BigQueryReadClient createBigQueryReadClient(Optional<String> endpoint) {
+  private BigQueryReadClient newClient(String endpoint) throws IOException {
+    InstantiatingGrpcChannelProvider.Builder transportBuilder =
+        BigQueryReadSettings.defaultGrpcTransportProviderBuilder()
+            .setHeaderProvider(userAgentHeaderProvider)
+            .setChannelsPerCpu(.1);
+    if (!endpoint.equals(DEFAULT)) {
+      log.info("Overriding endpoint to: ", endpoint);
+      transportBuilder.setEndpoint(endpoint);
+    }
+    BigQueryReadSettings.Builder clientSettings =
+        BigQueryReadSettings.newBuilder()
+            .setTransportChannelProvider(transportBuilder.build())
+            .setCredentialsProvider(FixedCredentialsProvider.create(credentials));
+    return BigQueryReadClient.create(clientSettings.build());
+  }
+
+  public synchronized BigQueryReadClient createBigQueryReadClient(Optional<String> endpoint) {
     try {
-      InstantiatingGrpcChannelProvider.Builder transportBuilder =
-          BigQueryReadSettings.defaultGrpcTransportProviderBuilder()
-              .setHeaderProvider(userAgentHeaderProvider);
-      endpoint.ifPresent(
-          e -> {
-            log.info("Overriding endpoint to: ", e);
-            transportBuilder.setEndpoint(e);
-          });
-      BigQueryReadSettings.Builder clientSettings =
-          BigQueryReadSettings.newBuilder()
-              .setTransportChannelProvider(transportBuilder.build())
-              .setCredentialsProvider(FixedCredentialsProvider.create(credentials));
-      return BigQueryReadClient.create(clientSettings.build());
+      String endpointKey = endpoint.orElse(DEFAULT);
+      BigQueryReadClient client = null;
+      synchronized (clients) {
+        client = clients.get(endpointKey);
+        if (client == null) {
+          client = newClient(endpointKey);
+          clients.put(endpointKey, client);
+        }
+      }
+      return client;
     } catch (IOException e) {
       throw new UncheckedIOException("Error creating BigQueryStorageClient", e);
+    }
+  }
+
+  private void writeObject(java.io.ObjectOutputStream out) throws IOException {
+    // This object needs to be serializable but clients aren't.  Its not
+    // too important to keep the same clients so simply clear them, serialize
+    // and then restore them.
+    HashMap<String, BigQueryReadClient> existing = new HashMap<>();
+    synchronized (clients) {
+      existing.putAll(clients);
+      clients.clear();
+      out.defaultWriteObject();
+      clients.putAll(existing);
     }
   }
 }
