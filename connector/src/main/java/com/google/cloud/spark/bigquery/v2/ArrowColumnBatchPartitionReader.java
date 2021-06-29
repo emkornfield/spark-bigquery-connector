@@ -44,6 +44,7 @@ import java.util.stream.Collectors;
 import org.apache.arrow.compression.CommonsCompressionFactory;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.util.AutoCloseables;
+import org.apache.arrow.util.Preconditions;
 import org.apache.arrow.vector.VectorLoader;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowReader;
@@ -61,11 +62,12 @@ class ArrowColumnBatchPartitionColumnBatchReader implements InputPartitionReader
   interface ArrowReaderAdapter extends AutoCloseable {
     boolean loadNextBatch() throws IOException;
 
-    VectorSchemaRoot root() throws IOException;
+    ColumnarBatch batch(List<String> namesInOrder, Map<String, StructField> userProvidedFieldMap) throws IOException;
   }
 
   static class SimpleAdapter implements ArrowReaderAdapter {
     private final ArrowReader reader;
+    private ColumnarBatch currentBatch;
 
     SimpleAdapter(ArrowReader reader) {
       this.reader = reader;
@@ -77,8 +79,12 @@ class ArrowColumnBatchPartitionColumnBatchReader implements InputPartitionReader
     }
 
     @Override
-    public VectorSchemaRoot root() throws IOException {
-      return reader.getVectorSchemaRoot();
+    public ColumnarBatch batch(List<String> namesInOrder, Map<String, StructField> userProvidedFieldMap) throws IOException {
+      if (currentBatch == null) {
+        currentBatch = toColumnarBatch(reader.getVectorSchemaRoot(), namesInOrder, userProvidedFieldMap);
+      }
+      currentBatch.setNumRows(reader.getVectorSchemaRoot().getRowCount());
+      return currentBatch;
     }
 
     @Override
@@ -93,10 +99,11 @@ class ArrowColumnBatchPartitionColumnBatchReader implements InputPartitionReader
 
   static class ParallelReaderAdapter implements ArrowReaderAdapter {
     private final ParallelArrowReader reader;
-    private final VectorLoader loader;
-    private final VectorSchemaRoot root;
+    private final List<ArrowReader> readers;
     private final List<AutoCloseable> closeables = new ArrayList<>();
     private IOException initialException;
+    private final ColumnarBatch[] batches;
+    int currentIdx = ParallelArrowReader.DONE;
 
     ParallelReaderAdapter(
         BufferAllocator allocator,
@@ -105,23 +112,12 @@ class ArrowColumnBatchPartitionColumnBatchReader implements InputPartitionReader
         BigQueryStorageReadRowsTracer tracer,
         AutoCloseable closeable) {
       Schema schema = null;
+      this.readers = readers;
       closeables.add(closeable);
-      try {
-        schema = readers.get(0).getVectorSchemaRoot().getSchema();
-      } catch (IOException e) {
-        initialException = e;
-        closeables.addAll(readers);
-        this.reader = null;
-        this.loader = null;
-        this.root = null;
-        return;
-      }
+      batches = new ColumnarBatch[readers.size()];
       BufferAllocator readerAllocator =
           allocator.newChildAllocator("ParallelReaderAllocator", 0, maxAllocation);
-      root = VectorSchemaRoot.create(schema, readerAllocator);
-      closeables.add(root);
-      loader = new VectorLoader(root);
-      this.reader = new ParallelArrowReader(readers, executor, loader, tracer);
+      this.reader = new ParallelArrowReader(readers, executor, tracer);
       closeables.add(0, reader);
       closeables.add(readerAllocator);
     }
@@ -131,12 +127,18 @@ class ArrowColumnBatchPartitionColumnBatchReader implements InputPartitionReader
       if (initialException != null) {
         throw new IOException(initialException);
       }
-      return reader.next();
+      currentIdx = reader.next();
+      return currentIdx != ParallelArrowReader.DONE;
     }
 
     @Override
-    public VectorSchemaRoot root() throws IOException {
-      return root;
+    public ColumnarBatch batch(List<String> namesInOrder, Map<String, StructField> userProvidedFieldMap) throws IOException {
+      Preconditions.checkState(currentIdx != ParallelArrowReader.DONE);
+      if (batches[currentIdx] == null) {
+        batches[currentIdx] = toColumnarBatch(readers.get(currentIdx).getVectorSchemaRoot(), namesInOrder, userProvidedFieldMap);
+      }
+      batches[currentIdx].setNumRows(readers.get(currentIdx).getVectorSchemaRoot().getRowCount());
+      return batches[currentIdx];
     }
 
     @Override
@@ -177,30 +179,21 @@ class ArrowColumnBatchPartitionColumnBatchReader implements InputPartitionReader
     this.userProvidedFieldMap =
         userProvidedFieldList.stream().collect(Collectors.toMap(StructField::name, field -> field));
 
-    if (numBackgroundThreads == 1) {
-      // There is a background thread created by ParallelArrowReader that serves
-      // as a thread to do parsing on.
-      InputStream fullStream = makeSingleInputStream(readRowsResponses, schema, tracer);
-      reader =
-          new ParallelReaderAdapter(
-              allocator,
-              ImmutableList.of(newArrowStreamReader(fullStream)),
-              MoreExecutors.newDirectExecutorService(),
-              tracer.forkWithPrefix("BackgroundReader"),
-              /*closeable=*/ null);
-    } else if (numBackgroundThreads > 1) {
+    if (numBackgroundThreads > 0) {
       // Subtract one because current excess tasks will be executed
       // on round robin thread in ParallelArrowReader.
       ExecutorService backgroundParsingService =
           new ThreadPoolExecutor(
               /*corePoolSize=*/ 1,
-              /*maximumPoolSize=*/ numBackgroundThreads - 1,
+              /*maximumPoolSize=*/ numBackgroundThreads,
               /*keepAliveTime=*/ 2,
               /*keepAlivetimeUnit=*/ TimeUnit.SECONDS,
               new SynchronousQueue<>(),
               new ThreadPoolExecutor.CallerRunsPolicy());
+      // We need one more stream then we have threads otherwise no background processing
+      // actually happens.
       IteratorMultiplexer multiplexer =
-          new IteratorMultiplexer(readRowsResponses, numBackgroundThreads);
+          new IteratorMultiplexer(readRowsResponses, numBackgroundThreads + 1);
       List<ArrowReader> readers = new ArrayList<>();
       for (int x = 0; x < numBackgroundThreads; x++) {
         BigQueryStorageReadRowsTracer multiplexedTracer = tracer.forkWithPrefix("multiplexed-" + x);
@@ -250,24 +243,24 @@ class ArrowColumnBatchPartitionColumnBatchReader implements InputPartitionReader
       return false;
     }
 
-    VectorSchemaRoot root = reader.root();
-    if (currentBatch == null) {
-      // trying to verify from dev@spark but this object
-      // should only need to get created once.  The underlying
-      // vectors should stay the same.
-      ColumnVector[] columns =
-          namesInOrder.stream()
-              .map(root::getVector)
-              .map(
-                  vector ->
-                      new ArrowSchemaConverter(vector, userProvidedFieldMap.get(vector.getName())))
-              .toArray(ColumnVector[]::new);
+    currentBatch = reader.batch(namesInOrder, userProvidedFieldMap);
 
-      currentBatch = new ColumnarBatch(columns);
-    }
-    currentBatch.setNumRows(root.getRowCount());
     tracer.rowsParseFinished(currentBatch.numRows());
     return true;
+  }
+
+  private static ColumnarBatch toColumnarBatch(VectorSchemaRoot root,
+       List<String> namesInOrder,
+       Map<String, StructField> userProvidedFieldMap) {
+    ColumnVector[] columns =
+        namesInOrder.stream()
+            .map(root::getVector)
+            .map(
+                vector ->
+                    new ArrowSchemaConverter(vector, userProvidedFieldMap.get(vector.getName())))
+            .toArray(ColumnVector[]::new);
+
+    return new ColumnarBatch(columns);
   }
 
   @Override

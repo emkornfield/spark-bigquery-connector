@@ -50,6 +50,7 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.invocation.InvocationOnMock;
+import scala.xml.PrettyPrinter.Para;
 
 public class ParallelArrowReaderTest {
 
@@ -85,7 +86,7 @@ public class ParallelArrowReaderTest {
   }
 
   @Test
-  public void testReadsAllBatchesInRoundRobin() throws Exception {
+  public void testReadsAllBatches() throws Exception {
 
     ColumnarBatch[] batches = new ColumnarBatch[6];
     for (int x = 0; x < batches.length; x++) {
@@ -103,21 +104,20 @@ public class ParallelArrowReaderTest {
             new SynchronousQueue<>(),
             new ThreadPoolExecutor.CallerRunsPolicy());
     List<Integer> read = new ArrayList<>();
-    try (VectorSchemaRoot root =
-        VectorSchemaRoot.create(r1.getVectorSchemaRoot().getSchema(), allocator)) {
-      VectorLoader loader = new VectorLoader(root);
+
+      List<ArrowReader> readers = ImmutableList.of(r1, r2, r3);
       ParallelArrowReader reader =
           new ParallelArrowReader(
-              ImmutableList.of(r1, r2, r3),
+              readers,
               executor,
-              loader,
               new LoggingBigQueryStorageReadRowsTracer("stream_name", 2));
 
-      while (reader.next()) {
-        read.add(((IntVector) root.getVector(0)).get(0));
+      int readerIdx = ParallelArrowReader.DONE;
+      while ((readerIdx = reader.next()) != ParallelArrowReader.DONE) {
+        read.add(((IntVector) readers.get(readerIdx).getVectorSchemaRoot().getVector(0)).get(0));
       }
       reader.close();
-    }
+
 
     assertThat(read).containsExactlyElementsIn(ImmutableList.of(0, 1, 2, 3, 4, 5));
     assertThat(executor.isShutdown()).isTrue();
@@ -135,18 +135,19 @@ public class ParallelArrowReaderTest {
     ArrowReader r3 = getReaderWithSequence();
     ExecutorService executor = Executors.newFixedThreadPool(3);
     List<Integer> read = new ArrayList<>();
+    ImmutableList<ArrowReader> readers = ImmutableList.of(r1, r2, r3);
     try (VectorSchemaRoot root =
         VectorSchemaRoot.create(r1.getVectorSchemaRoot().getSchema(), allocator)) {
       VectorLoader loader = new VectorLoader(root);
       ParallelArrowReader reader =
           new ParallelArrowReader(
-              ImmutableList.of(r1, r2, r3),
+              readers,
               executor,
-              loader,
               new LoggingBigQueryStorageReadRowsTracer("stream_name", 2));
 
-      while (reader.next()) {
-        read.add(((IntVector) root.getVector(0)).get(0));
+      int readerIdx = ParallelArrowReader.DONE;
+      while ((readerIdx = reader.next()) != ParallelArrowReader.DONE) {
+        read.add(((IntVector) readers.get(readerIdx).getVectorSchemaRoot().getVector(0)).get(0));
       }
       reader.close();
     }
@@ -171,7 +172,6 @@ public class ParallelArrowReaderTest {
           new ParallelArrowReader(
               ImmutableList.of(r1),
               executor,
-              new VectorLoader(root),
               new LoggingBigQueryStorageReadRowsTracer("stream_name", 2));
       IOException e = Assert.assertThrows(IOException.class, reader::next);
       assertThat(e).isSameInstanceAs(exception);
@@ -201,7 +201,6 @@ public class ParallelArrowReaderTest {
           new ParallelArrowReader(
               ImmutableList.of(r1, r2),
               executor,
-              loader,
               new LoggingBigQueryStorageReadRowsTracer("stream_name", 2));
 
       ExecutorService oneOff = Executors.newSingleThreadExecutor();
@@ -211,7 +210,7 @@ public class ParallelArrowReaderTest {
           oneOff.submit(
               () -> {
                 try {
-                  while (reader.next()) {}
+                  while (reader.next() != ParallelArrowReader.DONE) {}
                 } catch (Exception e) {
                   if (e.getCause() == null || !(e.getCause() instanceof InterruptedException)) {
                     return Instant.ofEpochMilli(0);
