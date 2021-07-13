@@ -35,13 +35,13 @@ public class StreamCombiningIterator implements Iterator<ReadRowsResponse> {
   private final int bufferEntriesPerStream;
   private final int numRetries;
   private final Object lock = new Object();
-  private final BigQueryReadClient client;
+  private final BigQueryReadClientFactory.ReadClient client;
   Object last;
   volatile boolean cancelled = false;
   private final Collection<Observer> observers;
 
   StreamCombiningIterator(
-      BigQueryReadClient client,
+      BigQueryReadClientFactory.ReadClient client,
       Collection<ReadRowsRequest.Builder> requests,
       int bufferEntriesPerStream,
       int numRetries) {

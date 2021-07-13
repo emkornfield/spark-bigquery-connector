@@ -22,7 +22,6 @@ import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.cloud.bigquery.storage.v1.BigQueryReadClient;
 import com.google.cloud.bigquery.storage.v1.ReadRowsRequest;
 import com.google.cloud.bigquery.storage.v1.ReadRowsResponse;
 
@@ -70,7 +69,7 @@ public class ReadRowsHelper implements AutoCloseable {
 
   private final BigQueryReadClientFactory bigQueryReadClientFactory;
   private final List<ReadRowsRequest.Builder> requests;
-  private BigQueryReadClient client;
+  private BigQueryReadClientFactory.ReadClient client;
   private StreamCombiningIterator incomingStream;
 
   public ReadRowsHelper(
@@ -94,10 +93,9 @@ public class ReadRowsHelper implements AutoCloseable {
   }
 
   public Iterator<ReadRowsResponse> readRows() {
-    if (client != null) {
-      client.close();
+    if (client == null) {
+      client = bigQueryReadClientFactory.createBigQueryReadClient(options.getEndpoint());
     }
-    client = bigQueryReadClientFactory.createBigQueryReadClient(options.getEndpoint());
     incomingStream =
         new StreamCombiningIterator(
             client, requests, options.prebufferResponses, options.getMaxReadRowsRetries());
@@ -122,9 +120,6 @@ public class ReadRowsHelper implements AutoCloseable {
         logger.debug("Error on cancel call", e);
       }
       incomingStream = null;
-    }
-    if (!client.isShutdown()) {
-      client.close();
     }
   }
 }

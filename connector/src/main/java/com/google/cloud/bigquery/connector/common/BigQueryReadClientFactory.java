@@ -20,11 +20,20 @@ import com.google.api.gax.grpc.InstantiatingGrpcChannelProvider;
 import com.google.auth.Credentials;
 import com.google.cloud.bigquery.storage.v1.BigQueryReadClient;
 import com.google.cloud.bigquery.storage.v1.BigQueryReadSettings;
+import com.google.cloud.bigquery.storage.v1.CreateReadSessionRequest;
+import com.google.cloud.bigquery.storage.v1.ReadSession;
+import com.google.cloud.bigquery.storage.v1.ReadRowsRequest;
+import com.google.cloud.bigquery.storage.v1.ReadRowsResponse;
 
 import java.util.Optional;
 import java.util.HashMap;
 import java.util.concurrent.ExecutionException;
 import javax.inject.Inject;
+import javax.inject.Qualifier;
+import java.lang.annotation.Retention;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
 import java.io.IOException;
 import java.io.Serializable;
 import java.io.UncheckedIOException;
@@ -46,21 +55,29 @@ public class BigQueryReadClientFactory implements Serializable {
   // Used for serializibility.  This is expected to be empty when Spark needs to serialized
   // it so it should be safe despite TransportChannelProvider not being serializable
   private final HashMap<String, BigQueryReadClient> clients = new HashMap<>();
+  private final double channelsPerCore;
+
+  @Qualifier
+  @Target({ElementType.FIELD, ElementType.PARAMETER, ElementType.METHOD})
+  @Retention(RetentionPolicy.RUNTIME)
+  public @interface ChannelSetting {}
 
   @Inject
   public BigQueryReadClientFactory(
       BigQueryCredentialsSupplier bigQueryCredentialsSupplier,
-      UserAgentHeaderProvider userAgentHeaderProvider) {
+      UserAgentHeaderProvider userAgentHeaderProvider,
+      @ChannelSetting double channelsPerCore) {
     // using Guava's optional as it is serializable
     this.credentials = bigQueryCredentialsSupplier.getCredentials();
     this.userAgentHeaderProvider = userAgentHeaderProvider;
+    this.channelsPerCore = channelsPerCore;
   }
 
   private BigQueryReadClient newClient(String endpoint) throws IOException {
     InstantiatingGrpcChannelProvider.Builder transportBuilder =
         BigQueryReadSettings.defaultGrpcTransportProviderBuilder()
             .setHeaderProvider(userAgentHeaderProvider)
-            .setChannelsPerCpu(.1);
+            .setChannelsPerCpu(channelsPerCore);
     if (!endpoint.equals(DEFAULT)) {
       log.info("Overriding endpoint to: ", endpoint);
       transportBuilder.setEndpoint(endpoint);
@@ -72,7 +89,24 @@ public class BigQueryReadClientFactory implements Serializable {
     return BigQueryReadClient.create(clientSettings.build());
   }
 
-  public synchronized BigQueryReadClient createBigQueryReadClient(Optional<String> endpoint) {
+  public static class ReadClient {
+    private final BigQueryReadClient client;
+
+    ReadClient(BigQueryReadClient client) {
+      this.client = client;
+    }
+
+    public ReadSession createReadSession(CreateReadSessionRequest request) {
+      return client.createReadSession(request);
+    }
+
+    public final com.google.api.gax.rpc.ServerStreamingCallable<ReadRowsRequest, ReadRowsResponse>
+        readRowsCallable() {
+      return client.readRowsCallable();
+    }
+  }
+
+  public synchronized ReadClient createBigQueryReadClient(Optional<String> endpoint) {
     try {
       String endpointKey = endpoint.orElse(DEFAULT);
       BigQueryReadClient client = null;
@@ -83,7 +117,7 @@ public class BigQueryReadClientFactory implements Serializable {
           clients.put(endpointKey, client);
         }
       }
-      return client;
+      return new ReadClient(client);
     } catch (IOException e) {
       throw new UncheckedIOException("Error creating BigQueryStorageClient", e);
     }

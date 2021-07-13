@@ -66,6 +66,7 @@ public class SparkBigQueryConfig implements BigQueryConfig, Serializable {
   public static final String INTERMEDIATE_FORMAT_OPTION = "intermediateFormat";
   public static final int DEFAULT_MATERIALIZATION_EXPRIRATION_TIME_IN_MINUTES = 24 * 60;
   @VisibleForTesting static final DataFormat DEFAULT_READ_DATA_FORMAT = DataFormat.ARROW;
+  private static final double DEFAULT_CHANNELS_PER_CORE = .125;
 
   @VisibleForTesting
   static final IntermediateFormat DEFAULT_INTERMEDIATE_FORMAT = IntermediateFormat.PARQUET;
@@ -125,6 +126,7 @@ public class SparkBigQueryConfig implements BigQueryConfig, Serializable {
   private int numBackgroundThreadsPerStream = 0;
   private int numPrebufferReadRowsResponses = MIN_BUFFERED_RESPONSES_PER_STREAM;
   private int numStreamsPerPartition = MIN_STREAMS_PER_PARTITION;
+  private double channelsPerCore = DEFAULT_CHANNELS_PER_CORE;
 
   @VisibleForTesting
   SparkBigQueryConfig() {
@@ -588,6 +590,11 @@ public class SparkBigQueryConfig implements BigQueryConfig, Serializable {
         .setInitialRetryDelay(Duration.ofMillis(1250))
         .setMaxRetryDelay(Duration.ofSeconds(5))
         .build();
+  }
+
+  @Override
+  public double channelsPerCore() {
+    return this.channelsPerCore;
   }
 
   public ReadSessionCreatorConfig toReadSessionCreatorConfig() {

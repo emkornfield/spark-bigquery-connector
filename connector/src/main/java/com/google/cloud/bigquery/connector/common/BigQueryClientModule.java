@@ -41,6 +41,12 @@ public class BigQueryClientModule implements com.google.inject.Module {
   }
 
   @Provides
+  @BigQueryReadClientFactory.ChannelSetting
+  double getChannelsPerCode(BigQueryConfig config) {
+    return config.channelsPerCore();
+  }
+
+  @Provides
   @Singleton
   public BigQueryCredentialsSupplier provideBigQueryCredentialsSupplier(BigQueryConfig config) {
     return new BigQueryCredentialsSupplier(
